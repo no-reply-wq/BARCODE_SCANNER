@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ARV Barcode Scanner</title>
+  <script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0f172a;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #fff;
+      padding: 20px;
+    }
+    h1 { font-size: 18px; font-weight: 600; margin-bottom: 20px; opacity: 0.9; letter-spacing: 0.5px; }
+    #video-wrap {
+      position: relative;
+      width: 100%;
+      max-width: 480px;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 0 0 3px #22c55e, 0 20px 60px rgba(0,0,0,0.5);
+    }
+    #video {
+      width: 100%;
+      aspect-ratio: 4/3;
+      object-fit: cover;
+      display: block;
+      background: #000;
+    }
+    #guide {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 68%; aspect-ratio: 2.5/1;
+      border: 2.5px solid #22c55e;
+      border-radius: 8px;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.42);
+    }
+    #scan-line {
+      position: absolute;
+      left: 16%; width: 68%; height: 2px;
+      background: linear-gradient(to right, transparent, #22c55e, transparent);
+      animation: scanAnim 2s linear infinite;
+    }
+    @keyframes scanAnim { 0%,100%{top:26%} 50%{top:68%} }
+    #hint {
+      position: absolute;
+      bottom: 10px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.65);
+      color: #fff; font-size: 12px;
+      padding: 4px 14px; border-radius: 999px;
+      white-space: nowrap;
+    }
+    #status {
+      margin-top: 20px;
+      font-size: 14px; min-height: 22px;
+      color: #86efac; text-align: center;
+    }
+    #success-box {
+      display: none;
+      margin-top: 16px;
+      background: #14532d;
+      border: 1px solid #22c55e;
+      border-radius: 12px;
+      padding: 16px 24px;
+      text-align: center;
+      max-width: 400px; width: 100%;
+    }
+    #success-box .label { font-size: 12px; opacity: 0.7; margin-bottom: 4px; }
+    #success-box .value { font-size: 22px; font-weight: 700; color: #4ade80; letter-spacing: 1px; }
+    #success-box .sub { font-size: 12px; opacity: 0.6; margin-top: 6px; }
+    #cancel-btn {
+      margin-top: 24px;
+      padding: 12px 40px;
+      background: #ef4444; color: #fff;
+      border: none; border-radius: 10px;
+      font-size: 15px; font-weight: 600;
+      cursor: pointer; letter-spacing: 0.3px;
+    }
+    #cancel-btn:hover { background: #dc2626; }
+    #error-msg { color: #f87171; font-size: 13px; margin-top: 12px; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>🔍 ARV Barcode Scanner</h1>
+
+  <div id="video-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="guide"></div>
+    <div id="scan-line"></div>
+    <div id="hint">Hold barcode inside the green box</div>
+  </div>
+
+  <p id="status">Starting camera...</p>
+  <p id="error-msg"></p>
+
+  <div id="success-box">
+    <div class="label">Barcode Scanned</div>
+    <div class="value" id="scanned-value"></div>
+    <div class="sub">Sending to app... this tab will close.</div>
+  </div>
+
+  <button id="cancel-btn" onclick="window.close()">Cancel</button>
+
+  <script>
+    var reader = new ZXing.BrowserMultiFormatReader();
+    var done   = false;
+
+    // Who opened this tab — the GAS app
+    // We'll send the result back via postMessage (works cross-origin)
+    var openerOrigin = document.referrer
+      ? new URL(document.referrer).origin
+      : '*';
+
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } } })
+      .catch(function() { return navigator.mediaDevices.getUserMedia({ video: true }); })
+      .then(function(stream) {
+        document.getElementById('status').textContent = 'Point camera at barcode — auto-detects instantly';
+        return reader.decodeFromStream(stream, 'video', function(result, err) {
+          if (result && !done) {
+            done = true;
+
+            var text = result.getText();
+
+            // ── Send result back to GAS app via postMessage ──
+            if (window.opener) {
+              try { window.opener.postMessage({ arv_barcode: text }, '*'); } catch(e) {}
+            }
+
+            // Show success UI
+            document.getElementById('status').textContent = 'Scanned!';
+            document.getElementById('scanned-value').textContent = text;
+            document.getElementById('success-box').style.display = 'block';
+            document.getElementById('video-wrap').style.opacity  = '0.4';
+            document.getElementById('scan-line').style.display   = 'none';
+
+            // Auto close
+            setTimeout(function() { window.close(); }, 1500);
+          }
+        });
+      })
+      .catch(function(err) {
+        document.getElementById('error-msg').textContent = 'Camera error: ' + err.message + '. Please allow camera access and reload.';
+        document.getElementById('status').textContent = '';
+      });
+  </script>
+</body>
+</html>
