@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>ARV Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    html,body{height:100%;background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;overflow:hidden;}
+    #reader{position:fixed;inset:0;z-index:1;}
+    #reader video{width:100%!important;height:100%!important;object-fit:cover!important;}
+    /* Hide html5-qrcode default UI chrome */
+    #reader__dashboard_section_csr,#reader__dashboard_section_swaplink,
+    #reader__status_span,#reader__header_message{display:none!important;}
+    #reader__scan_region{background:transparent!important;}
+    #reader__dashboard{padding:0!important;}
+    img[alt="Info icon"]{display:none!important;}
+    /* Flash on scan */
+    #flash{position:fixed;inset:0;z-index:10;background:#fff;opacity:0;pointer-events:none;transition:opacity .06s;}
+    #flash.on{opacity:.4;}
+    /* Top badge */
+    #badge{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:6;
+      background:rgba(0,0,0,.75);border:1.5px solid #22c55e;border-radius:20px;
+      padding:8px 18px;font-size:13px;font-weight:600;color:#22c55e;white-space:nowrap;
+      max-width:90vw;overflow:hidden;text-overflow:ellipsis;}
+    /* Bottom panel */
+    #panel{position:fixed;bottom:0;left:0;right:0;z-index:6;
+      background:linear-gradient(to bottom,rgba(0,0,0,.75),rgba(0,0,0,.97));
+      padding:14px 20px 28px;}
+    #count-row{display:flex;align-items:baseline;gap:8px;margin-bottom:2px;}
+    #count-num{font-size:34px;font-weight:800;color:#22c55e;line-height:1;}
+    #count-label{font-size:14px;color:#aaa;}
+    #recent{margin:10px 0 14px;display:flex;flex-direction:column;gap:4px;min-height:20px;}
+    .recent-item{display:flex;align-items:center;gap:8px;font-size:12.5px;}
+    .recent-dot{width:6px;height:6px;background:#22c55e;border-radius:50%;flex-shrink:0;}
+    .recent-id{font-family:monospace;color:#ddd;}
+    #btn-done{width:100%;padding:16px;background:#22c55e;color:#000;font-size:17px;
+      font-weight:700;border:none;border-radius:12px;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+    #btn-done:active{background:#16a34a;}
+    /* Error screen */
+    #error-screen{position:fixed;inset:0;background:#111;z-index:99;display:none;
+      flex-direction:column;align-items:center;justify-content:center;padding:32px;text-align:center;}
+    #error-screen h2{color:#f87171;margin-bottom:12px;font-size:20px;}
+    #error-screen p{color:#9ca3af;font-size:14px;line-height:1.7;}
+    #btn-retry{margin-top:22px;padding:13px 32px;background:#22c55e;color:#000;
+      border:none;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer;}
+  </style>
+</head>
+<body>
+
+<div id="reader"></div>
+<div id="flash"></div>
+<div id="badge">Starting camera…</div>
+
+<div id="panel">
+  <div id="count-row">
+    <span id="count-num">0</span>
+    <span id="count-label">rolls scanned</span>
+  </div>
+  <div id="recent"></div>
+  <button id="btn-done" onclick="doneScan()">Done Scanning</button>
+</div>
+
+<div id="error-screen">
+  <h2>Camera Not Available</h2>
+  <p>Please allow camera access in your browser,<br>then tap Retry.<br><br>
+  <span style="font-size:12px;color:#666;">On iPhone: Settings → Safari → Camera → Allow</span></p>
+  <button id="btn-retry" onclick="startScanner()">Retry</button>
+</div>
+
+<script>
+const DEBOUNCE_MS = 2500;   // ignore same code for 2.5s
+const MAX_RECENT  = 4;
+
+const recentCodes = {};
+const recentList  = [];
+let totalScanned  = 0;
+let scanner       = null;
+let running       = false;
+
+const badge    = document.getElementById('badge');
+const numEl    = document.getElementById('count-num');
+const recentEl = document.getElementById('recent');
+const flash    = document.getElementById('flash');
+const doneBtn  = document.getElementById('btn-done');
+
+// ── Beep ──
+let audioCtx = null;
+function beep() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.frequency.value = 1320; osc.type = 'sine';
+    gain.gain.setValueAtTime(0, audioCtx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.5, audioCtx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.18);
+    osc.start(); osc.stop(audioCtx.currentTime + 0.18);
+  } catch(e) {}
+}
+
+// ── On successful decode ──
+function onScanSuccess(decodedText) {
+  const val = String(decodedText || '').trim();
+  if (!val) return;
+  const now = Date.now();
+  if (recentCodes[val] && now - recentCodes[val] < DEBOUNCE_MS) return;
+  recentCodes[val] = now;
+
+  totalScanned++;
+  beep();
+  if (navigator.vibrate) navigator.vibrate(40);
+  flash.classList.add('on');
+  setTimeout(() => flash.classList.remove('on'), 100);
+
+  // Send to Planner — no navigation, camera stays live
+  if (window.opener && !window.opener.closed) {
+    try { window.opener.postMessage({ arv_barcode: val }, '*'); } catch(e) {}
+  }
+
+  const display = val.replace(/^[A-Za-z]+-/, '');
+  numEl.textContent = totalScanned;
+  recentList.unshift({ display });
+  if (recentList.length > MAX_RECENT) recentList.pop();
+  recentEl.innerHTML = recentList.map(r =>
+    `<div class="recent-item"><div class="recent-dot"></div><span class="recent-id">${r.display}</span></div>`
+  ).join('');
+
+  doneBtn.textContent = `Done — ${totalScanned} Roll${totalScanned !== 1 ? 's' : ''} Scanned`;
+  badge.textContent   = `✓ ${display}`;
+  setTimeout(() => { if (running) badge.textContent = 'Point camera at a barcode'; }, 1600);
+}
+
+// ── Start scanner ──
+function startScanner() {
+  document.getElementById('error-screen').style.display = 'none';
+  badge.textContent = 'Starting camera…';
+
+  const formats = [
+    Html5QrcodeSupportedFormats.CODE_128,
+    Html5QrcodeSupportedFormats.CODE_39,
+    Html5QrcodeSupportedFormats.EAN_13,
+    Html5QrcodeSupportedFormats.QR_CODE
+  ];
+
+  scanner = new Html5Qrcode('reader', { formatsToSupport: formats, verbose: false });
+
+  const config = {
+    fps: 10,
+    qrbox: (vw, vh) => {
+      const w = Math.min(vw * 0.85, 400);
+      return { width: w, height: Math.min(vh * 0.4, 220) };  // wide box for 1D barcodes
+    },
+    aspectRatio: window.innerHeight / window.innerWidth
+  };
+
+  scanner.start(
+    { facingMode: 'environment' },
+    config,
+    onScanSuccess,
+    () => {}   // per-frame decode misses — ignore silently
+  ).then(() => {
+    running = true;
+    badge.textContent = 'Point camera at a barcode';
+  }).catch(err => {
+    console.error('Camera start failed:', err);
+    document.getElementById('error-screen').style.display = 'flex';
+    badge.textContent = 'Camera unavailable';
+  });
+}
+
+// ── Done ──
+function doneScan() {
+  badge.textContent = 'Closing…';
+  doneBtn.disabled  = true;
+  running = false;
+
+  const finish = () => {
+    if (window.opener && !window.opener.closed) {
+      try { window.opener.postMessage({ arv_scan_done: true, total: totalScanned }, '*'); } catch(e) {}
+    }
+    window.close();
+    setTimeout(() => {
+      if (!window.closed) {
+        document.body.innerHTML = `
+          <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
+            height:100vh;background:#111;color:#fff;text-align:center;padding:32px;gap:14px;">
+            <div style="font-size:52px;">✅</div>
+            <h2 style="color:#22c55e;">Scanning Complete</h2>
+            <p style="color:#9ca3af;">${totalScanned} roll${totalScanned!==1?'s':''} scanned.<br>Return to the Planner tab.</p>
+          </div>`;
+      }
+    }, 400);
+  };
+
+  if (scanner && running !== null) {
+    scanner.stop().then(finish).catch(finish);
+  } else {
+    finish();
+  }
+}
+
+// Unlock audio on first touch (mobile requirement)
+document.addEventListener('touchstart', () => { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); }, { once: true });
+
+startScanner();
+</script>
+</body>
+</html>
